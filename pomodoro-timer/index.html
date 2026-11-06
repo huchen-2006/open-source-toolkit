@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<!--
+  番茄钟 - 单文件网页版
+
+  功能：25 分钟专注 / 5 分钟休息循环，支持自定义时长、今日完成统计、声音提醒，
+        设置与统计保存在浏览器 localStorage 中，刷新不丢失。
+  用法：双击本文件用浏览器打开即可，无需服务器、无需联网。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>番茄钟</title>
+<style>
+  :root {
+    --bg: #171b26;
+    --card: #212736;
+    --text: #e8ecf5;
+    --muted: #9aa5bb;
+    --work: #ff6b6b;
+    --rest: #4ecdc4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 0%, #263048 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border-radius: 20px;
+    padding: 28px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+    text-align: center;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: 2px; }
+  .mode { color: var(--muted); font-size: 13px; margin-bottom: 20px; letter-spacing: 1px; }
+  .ring { position: relative; width: 240px; height: 240px; margin: 0 auto 22px; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 10; stroke-linecap: round; }
+  .ring .track { stroke: #2f374a; }
+  .ring .bar { stroke: var(--work); transition: stroke-dashoffset .3s linear, stroke .3s; }
+  .ring.rest .bar { stroke: var(--rest); }
+  .time {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 52px; font-weight: 300; font-variant-numeric: tabular-nums;
+  }
+  .buttons { display: flex; gap: 10px; justify-content: center; margin-bottom: 18px; }
+  button {
+    flex: 1;
+    padding: 11px 0;
+    border: none;
+    border-radius: 10px;
+    background: #2f374a;
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+    transition: background .15s, transform .1s;
+  }
+  button:hover { background: #3a4459; }
+  button:active { transform: scale(.97); }
+  button.primary { background: var(--work); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  .stats { display: flex; justify-content: space-around; padding-top: 16px; border-top: 1px solid #2f374a; }
+  .stat b { display: block; font-size: 20px; font-weight: 500; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .settings { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  .settings label { margin: 0 6px; }
+  .settings input {
+    width: 52px; padding: 4px 6px; border-radius: 6px; border: 1px solid #3a4459;
+    background: #1c2231; color: var(--text); text-align: center; font-size: 13px;
+  }
+  .hint { margin-top: 12px; font-size: 12px; color: #6d7891; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>番茄钟</h1>
+  <div class="mode" id="mode">专注时间</div>
+
+  <div class="ring" id="ring">
+    <svg width="240" height="240">
+      <circle class="track" cx="120" cy="120" r="108"></circle>
+      <circle class="bar" id="bar" cx="120" cy="120" r="108"
+              stroke-dasharray="678.58" stroke-dashoffset="0"></circle>
+    </svg>
+    <div class="time" id="time">25:00</div>
+  </div>
+
+  <div class="buttons">
+    <button class="primary" id="startBtn">开始</button>
+    <button id="resetBtn">重置</button>
+    <button id="skipBtn">跳过</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b id="doneCount">0</b><span>今日番茄</span></div>
+    <div class="stat"><b id="focusMinutes">0</b><span>今日专注分钟</span></div>
+  </div>
+
+  <div class="settings">
+    <label>专注 <input type="number" id="workInput" min="1" max="180" value="25"> 分钟</label>
+    <label>休息 <input type="number" id="restInput" min="1" max="60" value="5"> 分钟</label>
+  </div>
+  <div class="hint">空格键开始 / 暂停，R 键重置。设置与统计保存在本机浏览器。</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "pomodoro.state.v1";
+  var CIRCUMFERENCE = 2 * Math.PI * 108;
+
+  var el = {
+    mode: document.getElementById("mode"),
+    ring: document.getElementById("ring"),
+    bar: document.getElementById("bar"),
+    time: document.getElementById("time"),
+    startBtn: document.getElementById("startBtn"),
+    resetBtn: document.getElementById("resetBtn"),
+    skipBtn: document.getElementById("skipBtn"),
+    doneCount: document.getElementById("doneCount"),
+    focusMinutes: document.getElementById("focusMinutes"),
+    workInput: document.getElementById("workInput"),
+    restInput: document.getElementById("restInput")
+  };
+
+  var state = {
+    phase: "work",
+    running: false,
+    remain: 25 * 60,
+    workMinutes: 25,
+    restMinutes: 5,
+    day: todayKey(),
+    doneCount: 0,
+    focusSeconds: 0
+  };
+
+  var tickHandle = null;
+
+  function todayKey() {
+    var now = new Date();
+    return now.getFullYear() + "-" + (now.getMonth() + 1) + "-" + now.getDate();
+  }
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) { return; }
+      var saved = JSON.parse(raw);
+      if (saved.workMinutes) { state.workMinutes = saved.workMinutes; }
+      if (saved.restMinutes) { state.restMinutes = saved.restMinutes; }
+      if (saved.day === todayKey()) {
+        state.doneCount = saved.doneCount || 0;
+        state.focusSeconds = saved.focusSeconds || 0;
+      }
+    } catch (err) {
+      /* 忽略损坏的本地数据 */
+    }
+    state.remain = state.workMinutes * 60;
+    el.workInput.value = state.workMinutes;
+    el.restInput.value = state.restMinutes;
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        workMinutes: state.workMinutes,
+        restMinutes: state.restMinutes,
+        day: state.day,
+        doneCount: state.doneCount,
+        focusSeconds: state.focusSeconds
+      }));
+    } catch (err) {
+      /* 隐私模式下写入可能失败，忽略 */
+    }
+  }
+
+  function totalSeconds() {
+    return (state.phase === "work" ? state.workMinutes : state.restMinutes) * 60;
+  }
+
+  function render() {
+    var total = totalSeconds();
+    var minutes = Math.floor(state.remain / 60);
+    var seconds = state.remain % 60;
+    el.time.textContent = (minutes < 10 ? "0" : "") + minutes + ":" +
+                          (seconds < 10 ? "0" : "") + seconds;
+    el.mode.textContent = state.phase === "work" ? "专注时间" : "休息时间";
+    el.ring.className = "ring" + (state.phase === "work" ? "" : " rest");
+    el.startBtn.textContent = state.running ? "暂停" : "开始";
+    el.startBtn.className = state.running ? "" : "primary";
+    document.title = el.time.textContent + (state.phase === "work" ? " 专注中" : " 休息中");
+
+    var ratio = total > 0 ? (total - state.remain) / total : 0;
+    el.bar.setAttribute("stroke-dasharray", CIRCUMFERENCE.toFixed(2));
+    el.bar.setAttribute("stroke-dashoffset", (CIRCUMFERENCE * ratio).toFixed(2));
+
+    el.doneCount.textContent = state.doneCount;
+    el.focusMinutes.textContent = Math.floor(state.focusSeconds / 60);
+  }
+
+  function beep() {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) { return; }
+      var ctx = new Ctx();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = state.phase === "work" ? 660 : 880;
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.9);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.9);
+    } catch (err) {
+      /* 浏览器未授权音频时静默忽略 */
+    }
+  }
+
+  function startTicking() {
+    if (tickHandle) { return; }
+    tickHandle = setInterval(function () {
+      if (state.remain > 0) {
+        state.remain -= 1;
+        if (state.phase === "work") {
+          state.focusSeconds += 1;
+          if (state.focusSeconds % 30 === 0) { save(); }
+        }
+        render();
+      }
+      if (state.remain <= 0) {
+        finishPhase();
+      }
+    }, 1000);
+  }
+
+  function stopTicking() {
+    if (tickHandle) {
+      clearInterval(tickHandle);
+      tickHandle = null;
+    }
+  }
+
+  function finishPhase() {
+    beep();
+    if (state.phase === "work") {
+      state.doneCount += 1;
+      state.phase = "rest";
+      state.remain = state.restMinutes * 60;
+    } else {
+      state.phase = "work";
+      state.remain = state.workMinutes * 60;
+    }
+    state.day = todayKey();
+    save();
+    render();
+  }
+
+  function toggle() {
+    state.running = !state.running;
+    if (state.running) {
+      startTicking();
+    } else {
+      stopTicking();
+    }
+    render();
+  }
+
+  function reset() {
+    state.running = false;
+    stopTicking();
+    state.remain = totalSeconds();
+    render();
+  }
+
+  function skip() {
+    state.phase = state.phase === "work" ? "rest" : "work";
+    state.remain = totalSeconds();
+    render();
+    if (!state.running) { save(); }
+  }
+
+  function applySettings() {
+    var work = parseInt(el.workInput.value, 10);
+    var rest = parseInt(el.restInput.value, 10);
+    state.workMinutes = (work >= 1 && work <= 180) ? work : 25;
+    state.restMinutes = (rest >= 1 && rest <= 60) ? rest : 5;
+    el.workInput.value = state.workMinutes;
+    el.restInput.value = state.restMinutes;
+    if (!state.running) {
+      state.remain = totalSeconds();
+    }
+    save();
+    render();
+  }
+
+  el.startBtn.addEventListener("click", toggle);
+  el.resetBtn.addEventListener("click", reset);
+  el.skipBtn.addEventListener("click", skip);
+  el.workInput.addEventListener("change", applySettings);
+  el.restInput.addEventListener("change", applySettings);
+
+  document.addEventListener("keydown", function (event) {
+    if (event.target.tagName === "INPUT") { return; }
+    if (event.code === "Space") {
+      event.preventDefault();
+      toggle();
+    } else if (event.key === "r" || event.key === "R") {
+      reset();
+    }
+  });
+
+  load();
+  render();
+})();
+</script>
+</body>
+</html>
